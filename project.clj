@@ -53,7 +53,8 @@
                  [slingshot "0.10.3"]
 
                  ;; Database connectivity
-                 [com.jolbox/bonecp "0.7.1.RELEASE" :exclusions [org.slf4j/slf4j-api]]
+                 ;; update this because it pulls in a newer guava, which json-schema-validator needs
+                 [com.jolbox/bonecp "0.8.0.RELEASE" :exclusions [org.slf4j/slf4j-api]] 
                  [org.clojure/java.jdbc "0.1.1"]
                  [org.hsqldb/hsqldb "2.2.8"]
                  [org.postgresql/postgresql "9.2-1003-jdbc4"]
@@ -76,9 +77,11 @@
                  [org.clojure/tools.macro "0.1.5"]
                  [com.novemberain/pantomime "2.1.0"]
                  [fast-zip-visit "1.0.2"]
-                 [robert/hooke "1.3.0"]]
+                 [robert/hooke "1.3.0"]
+                 [com.github.fge/json-schema-validator "2.2.6"]]
 
-  :jvm-opts ["-XX:MaxPermSize=128M"]
+  :jvm-opts ["-XX:MaxPermSize=128M"
+             #_"-agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=5005"]
 
   ;;The below test-selectors is basically using the PUPPETDB_DBTYPE
   ;;environment variable to be the test selector.  The selector below
