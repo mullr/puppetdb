@@ -88,11 +88,25 @@ or missing fields are an error.
 See [fact wire format v4][factsv4] for more information on the
 payload of this command.
 
-### "deactivate node", version 2
+### "deactivate node", version 3
 
-The payload is expected to be the certname of a node, as a raw JSON
-string, which will be deactivated effective as of the time the command
-is *processed*.
+The payload is a JSON map, formatted as follows:
+
+     {
+      "certname": <string>,
+      "producer_timestamp": <datetime>
+     }
+
+`certname` is required, and indicates the node to be deactivated.
+
+`producer_timestamp` is optional but *highly* recommended. When provided, it is
+used to determine the precedence between this command and other commands which
+modify the same node. This field is provided by, and should thus reflect the
+clock of, the Puppet master.
+
+When `producer_timestamp` is not provided, the PuppetDB server's local time is
+used.  If another command is received for a node while a non-timestamped
+"deactivate node" command is pending processing, the results are *undefined*.
 
 ### "store report", version 5
 
