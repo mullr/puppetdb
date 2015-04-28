@@ -1218,7 +1218,7 @@
       (is (= (set (stale-nodes (ago (days 1)))) #{"node1"})))))
 
 (deftest node-purge
-  (testing "should purge only nodes which were deactivated before the specified date"
+  (testing "should purge nodes which were deactivated before the specified date"
     (add-certname! "node1")
     (add-certname! "node2")
     (add-certname! "node3")
@@ -1226,7 +1226,21 @@
     (with-redefs [now (constantly (ago (days 10)))]
       (deactivate-node! "node2"))
 
-    (purge-deactivated-nodes! (ago (days 5)))
+    (purge-deactivated-and-expired-nodes! (ago (days 5)))
+
+    (is (= (map :certname (query-to-vec "SELECT certname FROM certnames ORDER BY certname ASC"))
+           ["node1" "node3"]))))
+
+(deftest purge-expired-nodes
+  (testing "should purge nodes which were expired before the specified date"
+    (add-certname! "node1")
+    (add-certname! "node2")
+    (add-certname! "node3")
+    (expire-node! "node1")
+    (with-redefs [now (constantly (ago (days 10)))]
+      (expire-node! "node2"))
+
+    (purge-deactivated-and-expired-nodes! (ago (days 5)))
 
     (is (= (map :certname (query-to-vec "SELECT certname FROM certnames ORDER BY certname ASC"))
            ["node1" "node3"]))))
