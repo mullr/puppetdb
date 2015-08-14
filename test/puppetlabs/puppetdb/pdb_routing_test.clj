@@ -1,4 +1,4 @@
-(ns puppetlabs.puppetdb.pdb-routing
+(ns puppetlabs.puppetdb.pdb-routing-test
   (:require [clojure.test :refer :all]
             [clj-http.client :as client]
             [puppetlabs.puppetdb.testutils.services :as svc-utils]
@@ -16,9 +16,9 @@
 
 (defn command-base-url
   [base-url]
-  (assoc base-url
-         :prefix "/pdb/cmd"
-         :version :v1))
+  (utils/pdb-cmd-base-url (:host base-url)
+                          (:port base-url)
+                          :v1))
 
 (defn pdb-get [base-url url-suffix]
   (let [resp (client/get (str (utils/base-url->str base-url)
@@ -29,9 +29,7 @@
       resp)))
 
 (defn submit-facts [base-url facts]
-  (svc-utils/sync-command-post (assoc base-url
-                                 :prefix "/pdb/cmd"
-                                 :version :v1)
+  (svc-utils/sync-command-post (command-base-url base-url)
                                "replace facts"
                                4
                                facts))
