@@ -54,13 +54,6 @@
                       "--config" "anything.ini"
                       "--numhosts" "42"))))
 
-(deftest runs-with-runinterval
-  (let [submitted (run-benchmark {}
-                                 "--config" "anything.ini"
-                                 "--numhosts" "42"
-                                 "--runinterval" "1")]
-    (is (>= (count submitted)) (* 3 42))))
-
 (deftest submit-one-record-of-each-type
   (let [submitted (run-benchmark {}
                                  "--config" "anything.ini"
