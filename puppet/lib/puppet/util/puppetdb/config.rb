@@ -14,6 +14,8 @@ module Puppet::Util::Puppetdb
         :soft_write_failure        => false,
         :server_url_timeout        => 30,
         :include_unchanged_resources => false,
+        :min_successful_submissions => 1,
+        :submit_only_server_urls   => ""
       }
 
       config_file ||= File.join(Puppet[:confdir], "puppetdb.conf")
@@ -51,6 +53,11 @@ module Puppet::Util::Puppetdb
       main_section = result['main'] || {}
       # symbolize the keys
       main_section = main_section.inject({}) {|h, (k,v)| h[k.to_sym] = v ; h}
+
+      if main_section[:soft_write_failure] and main_section[:min_successful_submissions]
+        raise "soft_write_failure and min_successful_submissions cannot be configured together"
+      end
+
       # merge with defaults but filter out anything except the legal settings
       config_hash = defaults.merge(main_section).reject do |k, v|
         !([:server,
@@ -59,7 +66,9 @@ module Puppet::Util::Puppetdb
            :include_unchanged_resources,
            :soft_write_failure,
            :server_urls,
-           :server_url_timeout].include?(k))
+           :server_url_timeout,
+           :min_successful_submissions,
+           :submit_only_server_urls].include?(k))
       end
 
       if config_hash[:server_urls]
@@ -69,11 +78,15 @@ module Puppet::Util::Puppetdb
         uses_server_urls = false
         config_hash[:server_urls] = ["https://#{config_hash[:server].strip}:#{config_hash[:port].to_s}"]
       end
+
       config_hash[:server_urls] = convert_and_validate_urls(config_hash[:server_urls])
 
       config_hash[:server_url_timeout] = config_hash[:server_url_timeout].to_i
       config_hash[:include_unchanged_resources] = Puppet::Util::Puppetdb.to_bool(config_hash[:include_unchanged_resources])
       config_hash[:soft_write_failure] = Puppet::Util::Puppetdb.to_bool(config_hash[:soft_write_failure])
+
+      config_hash[:submit_only_server_urls] = convert_and_validate_urls(config_hash[:submit_only_server_urls].split(",").map {|s| s.strip})
+      config_hash[:min_successful_submissions] = config_hash[:min_successful_submissions].to_i
 
       self.new(config_hash, uses_server_urls)
     rescue => detail
@@ -115,6 +128,14 @@ module Puppet::Util::Puppetdb
 
     def soft_write_failure
       config[:soft_write_failure]
+    end
+
+    def min_successful_submissions
+      config[:min_successful_submissions]
+    end
+
+    def submit_only_server_urls
+      config[:submit_only_server_urls]
     end
 
     # @!group Private instance methods
