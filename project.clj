@@ -10,7 +10,7 @@
    :sign-releases false})
 
 (def tk-version "1.1.1")
-(def tk-jetty9-version "1.3.1")
+(def tk-jetty9-version "1.5.0")
 (def ks-version "1.1.0")
 (def tk-status-version "0.2.1")
 

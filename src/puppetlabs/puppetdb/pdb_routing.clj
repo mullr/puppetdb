@@ -19,7 +19,9 @@
             [clojure.tools.logging :as log]
             [puppetlabs.puppetdb.config :as conf]
             [puppetlabs.puppetdb.middleware :as mid]
-            [puppetlabs.kitchensink.core :as ks]))
+            [puppetlabs.kitchensink.core :as ks]
+            [puppetlabs.experimental.websockets.client :as ws-client]
+            [clojure.core.async :as async]))
 
 
 (defn resource-request-handler [req]
@@ -93,15 +95,41 @@
                    true
                    @maint-mode-atom))))
 
+
 (tk/defservice pdb-routing-service
   [[:WebroutingService add-ring-handler get-route]
    [:PuppetDBServer shared-globals query set-url-prefix]
    [:PuppetDBCommandDispatcher
-    enqueue-command enqueue-raw-command response-pub]
+    enqueue-command enqueue-raw-command response-pub response-mult]
    [:MaintenanceMode enable-maint-mode maint-mode? disable-maint-mode]
    [:StatusService register-status]
-   [:DefaultedConfig get-config]]
+   [:DefaultedConfig get-config]
+   [:WebserverService add-websocket-handler]]
   (init [this context]
+
+        (add-websocket-handler
+         {:on-text (fn [ws text] (ws-client/send! ws text))}
+         "/pdb/events/v1/echo")
+
+        (let [connections (atom #{})
+              commands-ch (async/chan 100)]
+          (add-websocket-handler
+           {:on-connect (fn [ws]
+                          (println ">>>>>>>>>> connecting websocket")
+                          (swap! connections conj ws))
+            :on-close (fn [ws status-code reason]
+                        (println "<<<<<<<<<< disconnecting websocket")
+                        (swap! connections disj ws))}
+           "/pdb/events/v1/processed-commands")
+
+          (async/tap (response-mult) commands-ch)
+          (async/go-loop []
+            (let [cmd (async/<! commands-ch)
+                  cmd-text (json/generate-string cmd)]
+              (mapv #(ws-client/send! % cmd-text)
+                    @connections)
+              (recur))))
+
         (let [context-root (get-route this)
               query-prefix (str context-root "/query")
               config (get-config)
