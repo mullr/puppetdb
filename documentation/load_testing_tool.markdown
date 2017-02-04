@@ -73,14 +73,19 @@ so that the tool can shut down and clean up normally.
   option is incompatible with the preceding four.
 - **`--runinterval / -i`**: integer indicating the amount of time in
   minutes between puppet runs for each simulated node. Typical values
-  are 30 or 60.  This option requires some temporary filesystem space,
-  which will be allocated in TMPDIR (if set in the environment) or
-  java.io.tmpdir.
+  are 30 or 60.  Mutually exclusive with **`--nummsgs`**.  This option
+  requires some temporary filesystem space, which will be allocated in
+  TMPDIR (if set in the environment) or java.io.tmpdir.
+- **`--nummsgs`** / **`-N`**: integer indicating the number of
+  commands and/or reports to send for each host, after which benchmark
+  will exit.  Mutually exclusive with **`--runinterval`**.
 - **`--numhosts / -n`**: number of separate hosts that the tool should simulate.
 - **`--rand-perc / -r`**: what percentage of catalogs submissions should be
   changed (this simulates typical catalog changes, such as adding a resource,
   edge, or something similar). More changes to catalogs will cause a higher load
   on PuppetDB. A typical change percentage is 10.
+- **`--threads`** / **`-t`**: number of threads to use for command
+  submission; defaults to four times the number of available processors.
 
 >**Note:** If --facts, --catalogs, --reports, and --archive are unspecified, the
 >PuppetDB sample data will be used. This data includes catalogs, facts, and
