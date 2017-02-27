@@ -15,7 +15,8 @@
             [puppetlabs.trapperkeeper.app :as tk-app]
             [puppetlabs.trapperkeeper.bootstrap :as tk-bootstrap]
             [puppetlabs.trapperkeeper.config :as tk-config]
-            [puppetlabs.trapperkeeper.testutils.bootstrap :as tkbs])
+            [puppetlabs.trapperkeeper.testutils.bootstrap :as tkbs]
+            [puppetlabs.trapperkeeper.core :as tk])
   (:import [com.typesafe.config ConfigValueFactory]))
 
 (defprotocol TestServer
@@ -114,7 +115,7 @@
 (defn ast-query [pdb-server query]
   (pql-query pdb-server (json/generate-string query)))
 
-(defn call-with-synchronized-command-processing [pdb-server num-commands f]
+(defn call-with-synchronized-command-processing [pdb-server num-commands timeout-ms f]
   (let [dispatcher (-> pdb-server info-map :app (tk-app/get-service :PuppetDBCommandDispatcher))
         initial-count (-> dispatcher dispatch/stats :executed-commands)
         target-count (+ initial-count num-commands)
@@ -137,20 +138,21 @@
                       :target-count target-count
                       :body-result result})
 
-            (> (- (System/currentTimeMillis) timeout-start) tu/default-timeout-ms)
+            (> (- (System/currentTimeMillis) timeout-start) timeout-ms)
             (throw (ex-info "Timeout while waiting for PuppetDB to finish executing commands"
                             {:current-stats current-stats
                              :initial-count initial-count
                              :target-count target-count
-                             :timeout-ms tu/default-timeout-ms
+                             :timeout-ms timeout-ms
                              :body-result result}))
 
             :default
-            (do (Thread/sleep 25)
-                (recur))))))))
+            (do
+              (Thread/sleep 25)
+              (recur))))))))
 
-(defmacro with-synchronized-command-processing [pdb-server num-commands & body]
-  `(call-with-synchronized-command-processing ~pdb-server ~num-commands (fn [] (do ~@body))))
+(defmacro with-synchronized-command-processing [pdb-server num-commands timeout-ms & body]
+  `(call-with-synchronized-command-processing ~pdb-server ~num-commands ~timeout-ms (fn [] (do ~@body))))
 
 ;;; Puppet Server fixture
 
@@ -180,30 +182,34 @@
 
 (defn run-puppet-server [pdb-servers config-overrides]
   (let [pdb-infos (map info-map pdb-servers)
-        puppetdb-conf (io/file "target/puppetserver/master-conf/puppetdb.conf")]
+        puppetdb-conf (io/file "target/puppetserver/master-conf/puppetdb.conf")
+        {puppetserver-config-overrides :puppetserver
+         terminus-config-overrides :terminus} config-overrides]
     (fs/copy-dir "test-resources/puppetserver/ssl" "./target/puppetserver/master-conf/ssl")
     (fs/copy+ "test-resources/puppetserver/puppet.conf" "target/puppetserver/master-conf/puppet.conf")
     (fs/mkdirs "target/puppetserver/master-code/environments/production/modules")
-
 
     (install-terminus-into "vendor/puppetserver-gems/gems/puppet-4.9.2/lib/puppet/")
 
     (fs/create puppetdb-conf)
     (ks/spit-ini puppetdb-conf
-                 {:main {:server_urls (->> (for [pdb-info pdb-infos]
-                                             (str "https://" (:hostname pdb-info) ":" (:port pdb-info)))
-                                           (clojure.string/join ","))}})
+                 (ks/deep-merge
+                  {:main {:server_urls (->> (for [pdb-info pdb-infos]
+                                              (str "https://" (:hostname pdb-info) ":" (:port pdb-info)))
+                                            (clojure.string/join ","))}}
+                  terminus-config-overrides))
 
     (let [services (tk-bootstrap/parse-bootstrap-config! dev-bootstrap-file)
           tmp-conf (ks/temp-file "puppetserver" ".conf")
           _ (fs/copy dev-config-file tmp-conf)
-          config (-> (tk-config/load-config (.getPath tmp-conf))
-                     (ks/deep-merge config-overrides))]
+          config (tk-config/load-config (.getPath tmp-conf))]
       (PuppetServerTestServer. {:hostname "localhost"
                                 :port 8140
                                 :code-dir "target/puppetserver/master-code"
                                 :conf-dir "target/puppetserver/master-conf"}
-                               [(.getPath tmp-conf) "target/puppetserver/master-conf" "target/puppetserver/master-code"]
+                               [(.getPath tmp-conf)
+                                "target/puppetserver/master-conf"
+                                "target/puppetserver/master-code"]
                                (tkbs/bootstrap-services-with-config services config)))))
 
 ;;; run puppet
@@ -217,30 +223,39 @@
         (throw (ex-info message result)))
       result)))
 
+(defn run-puppet
+  ([puppet-server pdb-server manifest-content]
+   (run-puppet puppet-server pdb-server manifest-content {}))
+
+  ([puppet-server pdb-server manifest-content
+    {:keys [certname timeout]
+     :or {certname "default-agent"
+          timeout tu/default-timeout-ms}
+     :as opts}]
+   (let [{:keys [code-dir conf-dir hostname port]} (info-map puppet-server)
+         site-pp (str code-dir  "/environments/production/manifests/site.pp")
+         agent-conf-dir (str "target/agent-conf/" certname)]
+     (fs/mkdirs (fs/parent site-pp))
+     (spit site-pp manifest-content)
+
+     (fs/copy+ "test-resources/puppetserver/ssl/certs/ca.pem" (str agent-conf-dir "/ssl/certs/ca.pem"))
+
+     (with-synchronized-command-processing pdb-server 3 timeout
+       (bundle-exec "puppet" "agent" "-t"
+                    "--confdir" agent-conf-dir
+                    "--server" hostname
+                    "--masterport" (str port)
+                    "--color" "false"
+                    "--certname" certname
+                    "--trace")))))
+
 (defn run-puppet-as [certname puppet-server pdb-server manifest-content]
-  (let [{:keys [code-dir conf-dir hostname port]} (info-map puppet-server)
-        site-pp (str code-dir  "/environments/production/manifests/site.pp")
-        agent-conf-dir (str "target/agent-conf/" certname)]
-    (fs/mkdirs (fs/parent site-pp))
-    (spit site-pp manifest-content)
-
-    (fs/copy+ "test-resources/puppetserver/ssl/certs/ca.pem" (str agent-conf-dir "/ssl/certs/ca.pem"))
-
-    (with-synchronized-command-processing pdb-server 3
-      (bundle-exec "puppet" "agent" "-t"
-                   "--confdir" agent-conf-dir
-                   "--server" hostname
-                   "--masterport" (str port)
-                   "--color" "false"
-                   "--certname" certname
-                   "--trace"))))
-
-(defn run-puppet [puppet-server pdb-server manifest-content]
-  (run-puppet-as "default-agent" puppet-server pdb-server manifest-content))
+  (run-puppet puppet-server pdb-server manifest-content
+              {:certname certname}))
 
 (defn run-puppet-node-deactivate [pdb-server certname-to-deactivate]
   (install-terminus-into "vendor/bundle/ruby/2.3.0/gems/puppet-4.9.2/lib/puppet/")
-  (with-synchronized-command-processing pdb-server 1
+  (with-synchronized-command-processing pdb-server 1 tu/default-timeout-ms
     (bundle-exec "puppet" "node" "deactivate"
                  "--confdir" "target/puppetserver/master-conf"
                  "--color" "false"
