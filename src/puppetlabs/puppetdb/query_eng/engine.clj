@@ -957,21 +957,40 @@
                                          :field :certnames.certname}
                              "package_name" {:type :string
                                              :queryable? true
-                                             :field :pi.name}
+                                             :field :p.name}
                              "version" {:type :string
                                         :queryable? true
-                                        :field :pi.version}
+                                        :field :p.version}
                              "provider" {:type :string
                                          :queryable? true
-                                         :field :pi.provider}}
+                                         :field :p.provider}}
 
-               :selection {:from [[:package_inventory :pi]]
-                           :left-join [:certnames
-                                       [:= :pi.certname_id :certnames.id]]}
+               :selection {:from [[:packages :p]]
+                           :inner-join [[:certname_packages :cp]
+                                        [:= :cp.package_id :p.id]
+                                        :certnames
+                                        [:= :cp.certname_id :certnames.id]]}
 
                :relationships certname-relations
 
                :alias "packages"
+               :subquery? false
+               :source-table "package_inventory"}))
+
+(def just-packages-query
+  "Basic packages query"
+  (map->Query {:projections {"package_name" {:type :string
+                                             :queryable? true
+                                             :field :p.name}
+                             "version" {:type :string
+                                        :queryable? true
+                                        :field :p.version}
+                             "provider" {:type :string
+                                         :queryable? true
+                                         :field :p.provider}}
+
+               :selection {:from [[:packages :p]]}
+               :alias "just-packages"
                :subquery? false
                :source-table "package_inventory"}))
 
@@ -1256,6 +1275,7 @@
    "select_environments" environments-query
    "select_producers" producers-query
    "select_packages" packages-query
+   "select_just_packages" just-packages-query
    "select_events" report-events-query
    "select_facts" facts-query
    "select_factsets" factsets-query

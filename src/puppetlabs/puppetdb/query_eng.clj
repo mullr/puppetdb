@@ -51,6 +51,8 @@
                 :rec eng/producers-query}
     :packages {:munge (constantly identity)
                :rec eng/packages-query}
+    :just_packages {:munge (constantly identity)
+                    :rec eng/just-packages-query}
     :events {:munge events/munge-result-rows
              :rec eng/report-events-query}
     :edges {:munge edges/munge-result-rows
