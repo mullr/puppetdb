@@ -106,9 +106,10 @@
   (get (invert-fact-schema mfs) fact))
 
 (pls/defn-validated fact-value->sql [value, type :- fact-type]
-  (if (= type "object")
-    (sutils/munge-jsonb-for-storage value)
-    value))
+  (when value
+    (if (= type "object")
+      (sutils/munge-jsonb-for-storage value)
+      value)))
 
 (defn select-table-hashes [factset-id tables]
   (let [sql (->> tables
@@ -153,16 +154,26 @@
              [factset-id]))))
 
 (defn store-fact-values [factset-id mfs values]
-  (let [facts-by-table (->> values
+  (let [default-values (->> mfs
+                            (mapcat (fn [[sections fs]] (keys fs)))
+                            (map (fn [fact] [fact nil]))
+                            (into {}))
+        defaulted-values (merge default-values values)
+        facts-by-table (->> defaulted-values
                             (map (fn [[fact value]]
                                    (assoc (fact-table-and-type fact mfs)
                                           :fact fact
                                           :value value)))
+                            (remove #(nil? (:table %)))
                             (group-by :table))
-        current-hashes-by-table (select-table-hashes factset-id (keys facts-by-table))]
+        affected-tables (keys facts-by-table)
+        current-hashes-by-table (when (seq affected-tables)
+                                  (select-table-hashes factset-id affected-tables))]
 
     (doseq [[table fact-maps] facts-by-table]
       (let [current-hash (current-hashes-by-table table)
+            ;; keep the hash consistent
+            fact-maps (sort-by :fact fact-maps)
             new-hash (hash fact-maps)]
         (cond
           (nil? current-hash) (insert-fact-row table factset-id new-hash fact-maps)

@@ -44,7 +44,8 @@
             [puppetlabs.puppetdb.time :refer [to-timestamp]]
             [honeysql.core :as hcore]
             [puppetlabs.i18n.core :refer [trs]]
-            [puppetlabs.puppetdb.package-util :as pkg-util])
+            [puppetlabs.puppetdb.package-util :as pkg-util]
+            [puppetlabs.puppetdb.facts-plus :as facts-plus])
   (:import [org.postgresql.util PGobject]
            [org.joda.time Period]))
 
@@ -974,12 +975,15 @@
   "Delete all the facts for certname."
   [certname :- String]
   (jdbc/with-db-transaction []
-    (let [factset-id (certname-to-factset-id certname)
-          dead-pairs (select-pid-vid-pairs-for-factset factset-id)]
-      (jdbc/do-commands (format "DELETE FROM facts WHERE factset_id = %s"
-                                factset-id))
-      (delete-pending-path-id-orphans! factset-id (set (map first dead-pairs)))
-      (delete-pending-value-id-orphans! factset-id dead-pairs)
+    (let [factset-id (certname-to-factset-id certname)]
+      ;; with facts-plus, deletes cascade from factsets
+      (when-not @facts-plus/enable
+        (let [dead-pairs (select-pid-vid-pairs-for-factset factset-id)]
+
+          (jdbc/do-commands (format "DELETE FROM facts WHERE factset_id = %s"
+                                    factset-id))
+          (delete-pending-path-id-orphans! factset-id (set (map first dead-pairs)))
+          (delete-pending-value-id-orphans! factset-id dead-pairs)))
       (jdbc/delete! :factsets ["id=?" factset-id]))))
 
 (defn-validated insert-facts-pv-pairs!
@@ -1176,30 +1180,36 @@
      :as fact-data} :- facts-schema
     include-hash? :- s/Bool]
    (jdbc/with-db-transaction []
-     (jdbc/insert!
-      :factsets
-      (merge
-       {:certname certname
-        :timestamp (to-timestamp timestamp)
-        :environment_id (ensure-environment environment)
-        :producer_timestamp (to-timestamp producer_timestamp)
-        :producer_id (ensure-producer producer)}
-       (when include-hash?
-         {:hash (sutils/munge-hash-for-storage
-                 (shash/fact-identity-hash fact-data))})))
-     ;; Ensure that all the required paths and values exist, and then
-     ;; insert the new facts.
-     (let [paths-and-valuemaps (facts/facts->paths-and-valuemaps values)
-           pathstrs (map (comp facts/factpath-to-string first) paths-and-valuemaps)
-           valuemaps (map second paths-and-valuemaps)
-           vhashes (map :value_hash valuemaps)
-           paths-to-ids (realize-paths! pathstrs)
-           vhashes-to-ids (realize-values! valuemaps)
-           pairs (map #(vector (get paths-to-ids %1)
-                               (get vhashes-to-ids %2))
-                      pathstrs vhashes)]
-       (insert-facts-pv-pairs! (certname-to-factset-id certname)
-                               pairs))
+     (let [res (jdbc/insert!
+                :factsets
+                (merge
+                 {:certname certname
+                  :timestamp (to-timestamp timestamp)
+                  :environment_id (ensure-environment environment)
+                  :producer_timestamp (to-timestamp producer_timestamp)
+                  :producer_id (ensure-producer producer)}
+                 (when include-hash?
+                   {:hash (sutils/munge-hash-for-storage
+                           (shash/fact-identity-hash fact-data))})))
+           factset-id (:id (first res))]
+       (if @facts-plus/enable
+         (facts-plus/store-fact-values factset-id
+                                       (facts-plus/load-default-fact-schema)
+                                       values)
+
+         ;; Ensure that all the required paths and values exist, and then
+         ;; insert the new facts.
+         (let [paths-and-valuemaps (facts/facts->paths-and-valuemaps values)
+               pathstrs (map (comp facts/factpath-to-string first) paths-and-valuemaps)
+               valuemaps (map second paths-and-valuemaps)
+               vhashes (map :value_hash valuemaps)
+               paths-to-ids (realize-paths! pathstrs)
+               vhashes-to-ids (realize-values! valuemaps)
+               pairs (map #(vector (get paths-to-ids %1)
+                                   (get vhashes-to-ids %2))
+                          pathstrs vhashes)]
+           (insert-facts-pv-pairs! (certname-to-factset-id certname)
+                                   pairs))))
 
      (when (seq package_inventory)
        (insert-packages certname package_inventory)))))
@@ -1210,61 +1220,80 @@
    to match the facts argument. (cf. add-facts!)"
   [{:keys [certname values environment timestamp producer_timestamp producer package_inventory] :as fact-data}
    :- facts-schema]
+  (if @facts-plus/enable
+    (jdbc/with-db-transaction []
+      (let [{:keys [package_hash certname_id factset_id]} (certname-factset-metadata certname)
+            factset-id factset_id]
 
-  (jdbc/with-db-transaction []
-    (let [{:keys [package_hash certname_id factset_id]} (certname-factset-metadata certname)
-          factset-id factset_id
-          initial-factset-paths-vhashes
-          (query-to-vec
-           (format "SELECT fp.path, %s AS value_hash FROM facts f
+        (facts-plus/store-fact-values factset-id (facts-plus/load-default-fact-schema) values)
+
+        (when (or package_hash (seq package_inventory))
+          (update-packages certname_id package_hash package_inventory))
+
+        (jdbc/update! :factsets
+                      {:timestamp (to-timestamp timestamp)
+                       :environment_id (ensure-environment environment)
+                       :producer_timestamp (to-timestamp producer_timestamp)
+                       :hash (-> fact-data
+                                 shash/fact-identity-hash
+                                 sutils/munge-hash-for-storage)
+                       :producer_id (ensure-producer producer)}
+                      ["id=?" factset-id])))
+
+    (jdbc/with-db-transaction []
+      (let [{:keys [package_hash certname_id factset_id]} (certname-factset-metadata certname)
+            factset-id factset_id
+            initial-factset-paths-vhashes
+            (query-to-vec
+             (format "SELECT fp.path, %s AS value_hash FROM facts f
                       INNER JOIN fact_paths fp ON f.fact_path_id = fp.id
                       INNER JOIN fact_values fv ON f.fact_value_id = fv.id
                       WHERE factset_id = ?"
-                   (sutils/sql-hash-as-str "fv.value_hash"))
-           factset-id)
-         ;; Ensure that all the required paths and values exist.
-         paths-and-valuemaps (facts/facts->paths-and-valuemaps values)
-         pathstrs (map (comp facts/factpath-to-string first) paths-and-valuemaps)
-         valuemaps (map second paths-and-valuemaps)
-         vhashes (map :value_hash valuemaps)
-         paths-to-ids (realize-paths! pathstrs)
-         vhashes-to-ids (realize-values! valuemaps)
-         ;; Add new facts and remove obsolete facts.
-         replacement-pv-pairs (set (map #(vector (paths-to-ids %1)
-                                                 (vhashes-to-ids %2))
-                                        pathstrs vhashes))
-         current-pairs (set (select-pid-vid-pairs-for-factset factset-id))
-         [new-pairs rm-pairs] (data/diff replacement-pv-pairs current-pairs)]
+                     (sutils/sql-hash-as-str "fv.value_hash"))
+             factset-id)
+            ;; Ensure that all the required paths and values exist.
+            paths-and-valuemaps (facts/facts->paths-and-valuemaps values)
+            pathstrs (map (comp facts/factpath-to-string first) paths-and-valuemaps)
+            valuemaps (map second paths-and-valuemaps)
+            vhashes (map :value_hash valuemaps)
+            paths-to-ids (realize-paths! pathstrs)
+            vhashes-to-ids (realize-values! valuemaps)
+            ;; Add new facts and remove obsolete facts.
+            replacement-pv-pairs (set (map #(vector (paths-to-ids %1)
+                                                    (vhashes-to-ids %2))
+                                           pathstrs vhashes))
+            current-pairs (set (select-pid-vid-pairs-for-factset factset-id))
+            [new-pairs rm-pairs] (data/diff replacement-pv-pairs current-pairs)]
 
-     ;; Paths are unique per factset so we can delete solely based on pid.
-     (when rm-pairs
-       (let [rm-pids (set (map first rm-pairs))]
-         (jdbc/do-prepared
-          (format "DELETE FROM facts WHERE factset_id = ? AND fact_path_id %s"
-                  (jdbc/in-clause rm-pids))
-          (cons factset-id rm-pids))))
+        ;; Paths are unique per factset so we can delete solely based on pid.
+        (when rm-pairs
+          (let [rm-pids (set (map first rm-pairs))]
+            (jdbc/do-prepared
+             (format "DELETE FROM facts WHERE factset_id = ? AND fact_path_id %s"
+                     (jdbc/in-clause rm-pids))
+             (cons factset-id rm-pids))))
 
-     (insert-facts-pv-pairs! factset-id new-pairs)
+        (insert-facts-pv-pairs! factset-id new-pairs)
 
-     (when rm-pairs
-       (delete-pending-path-id-orphans! factset-id
-                                        (set/difference
-                                         (set (map first rm-pairs))
-                                         (set (map first new-pairs))))
-       (delete-pending-value-id-orphans! factset-id rm-pairs))
+        (when rm-pairs
+          (delete-pending-path-id-orphans! factset-id
+                                           (set/difference
+                                            (set (map first rm-pairs))
+                                            (set (map first new-pairs))))
+          (delete-pending-value-id-orphans! factset-id rm-pairs))
 
-      (when (or package_hash (seq package_inventory))
-        (update-packages certname_id package_hash package_inventory))
+        (when (or package_hash (seq package_inventory))
+          (update-packages certname_id package_hash package_inventory))
 
-     (jdbc/update! :factsets
-                   {:timestamp (to-timestamp timestamp)
-                    :environment_id (ensure-environment environment)
-                    :producer_timestamp (to-timestamp producer_timestamp)
-                    :hash (-> fact-data
-                              shash/fact-identity-hash
-                              sutils/munge-hash-for-storage)
-                    :producer_id (ensure-producer producer)}
-                   ["id=?" factset-id]))))
+        (jdbc/update! :factsets
+                      {:timestamp (to-timestamp timestamp)
+                       :environment_id (ensure-environment environment)
+                       :producer_timestamp (to-timestamp producer_timestamp)
+                       :hash (-> fact-data
+                                 shash/fact-identity-hash
+                                 sutils/munge-hash-for-storage)
+                       :producer_id (ensure-producer producer)}
+                      ["id=?" factset-id])))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Reports
