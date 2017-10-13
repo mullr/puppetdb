@@ -34,7 +34,6 @@
                        tables))
       (is (contains? volatile-facts "uptime")))))
 
-
 (defn select-facts-from-table [factset-id tablename]
   (->>  (-> (jdbc/query [(format "select * from %s where factset_id=?" tablename)
                          factset-id])

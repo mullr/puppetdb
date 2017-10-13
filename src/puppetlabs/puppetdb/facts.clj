@@ -13,6 +13,7 @@
             [puppetlabs.puppetdb.package-util :refer [package-tuple hashed-package-tuple
                                                       package-tuple-hash]]))
 
+
 ;; SCHEMA
 
 (def fact-path-element

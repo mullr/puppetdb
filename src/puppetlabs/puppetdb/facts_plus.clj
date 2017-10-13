@@ -9,7 +9,8 @@
             [clojure.set :as set]
             [clojure.string :as str]
             [clojure.string :as string]
-            [puppetlabs.puppetdb.scf.storage-utils :as sutils]))
+            [puppetlabs.puppetdb.scf.storage-utils :as sutils]
+            [clojure.core.async :as async]))
 
 ;; top level switch for the feature flag; remove this when it becomes the default.
 (def enable (atom true))
@@ -182,3 +183,79 @@
           ;; to internally rewrite the whole thing anyway.
           :else (update-fact-row table factset-id new-hash fact-maps))))))
 
+
+(defn rand-str [len]
+  (apply str (take len (repeatedly #(char (+ (rand 26) 65))))))
+
+(defn gen-stable []
+  (-> (into {}
+            (for [fact-num (range 150)]
+              [(str "fact_" fact-num) (rand-str (rand-int 256))]))
+      (assoc "rand-float" (rand)
+             "two-vals" (rand-nth ["a" "b"])
+             "three-vals" (rand-nth ["a" "b" "c"])
+             "four-vals" (rand-nth ["a" "b" "c" "d"]))))
+
+(defn gen-volatile []
+  (-> (into {}
+            (for [fact-num (range 10)]
+              [(str "volatile_" fact-num) (rand-str (rand-int 256))]))))
+
+(comment
+  (jdbc/do-commands "drop table json_facts")
+  (jdbc/do-commands "create table json_facts (eid bigint unique not null, facts jsonb)")
+  (jdbc/do-commands "delete from json_facts")
+
+  (let [in (async/chan 1000)
+        out (async/chan 1000)]
+
+    (async/go-loop [n 0]
+      (if (< n 100000)
+        (do
+          (async/>! in n)
+          (recur (inc n)))
+        (async/close! in)))
+
+    (async/go-loop []
+      (when (async/<! out)
+        (recur)))
+
+    (async/pipeline-blocking 16
+                             out
+                             (map (fn [x]
+                                    (jdbc/do-prepared
+                                     "insert into json_facts(eid, facts) values (?, ?)"
+                                     [x
+                                      (fact-value->sql (gen-facts) "object")])))
+                             in
+                             true))
+
+
+  (let [in (async/chan 1000)
+        out (async/chan 1000)]
+
+    (async/go-loop [n 0]
+      (if (< n 100000)
+        (do
+          (async/>! in n)
+          (recur (inc n)))
+        (async/close! in)))
+
+    (async/go-loop []
+      (when (async/<! out)
+        (recur)))
+
+    (async/pipeline-blocking 16
+                             out
+                             (map (fn [x]
+                                    (jdbc/do-prepared
+                                     "update json_facts set volatile=? where eid=?"
+                                     [(fact-value->sql (gen-volatile) "object") x])))
+                             in
+                             true))
+
+
+
+  (jdbc/query "select * from json_facts limit 2")
+
+  )
