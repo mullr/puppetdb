@@ -843,6 +843,8 @@
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Facts
 
+(def enable-json-facts (atom true))
+
 (defn-validated select-pid-vid-pairs-for-factset
   :- [(s/pair s/Int "path-id" s/Int "value-id")]
   "Return a collection of pairs of [path-id value-id] for the indicated factset."
@@ -1199,14 +1201,9 @@
        (insert-packages certname package_inventory)))))
 
 (defn volatile-fact-keys-for-factset [factset-id]
-  ;; TODO: ask postgres for the keys
- (-> (jdbc/query-to-vec "select volatile from factsets where id=?"
-                        factset-id)
-     first
-     :volatile
-     str
-     json/parse-string
-     keys))
+  (->> (jdbc/query-to-vec "select jsonb_object_keys(volatile) as fact from factsets where id=?"
+                          factset-id)
+       (map :fact)))
 
 (defn load-stable-facts [factset-id]
   (-> (jdbc/query-to-vec "select stable from factsets where id=?"
@@ -1215,6 +1212,7 @@
       :stable
       str
       json/parse-string))
+
 
 #_(defn update-factset-json-cols
   ([factset-id new-volatile-facts]
@@ -1245,38 +1243,30 @@
           ;; previously volatile stays that way. Any stable value that changes
           ;; becomes volatile. Newly volatile facts are removed from the stable
           ;; map.
-          ;; current-volatile-fact-keys (volatile-fact-keys-for-factset factset_id)
-          ;; incoming-volatile-facts (select-keys values current-volatile-fact-keys)
-          ;; incoming-stable-facts (apply dissoc values current-volatile-fact-keys)
-          ;; incoming-stable-fact-hash (hash incoming-stable-facts)
-          fact-json-updates
-           {:stable (sutils/munge-jsonb-for-storage values)}
-#_          (if (not= stable_hash incoming-stable-fact-hash)
-            (do
-              (log/error "UPDATING BOTH")
-              ;; stable facts are different; load the json and move the ones that
-              ;; changed into volatile
-              (let [current-stable-facts (load-stable-facts factset_id)
-                    changed-facts (->> incoming-stable-facts
-                                       (filter (fn [[fact new-value]]
-                                                 (when-let [current (get current-stable-facts fact)]
-                                                   (not= new-value current))))
-                                       (into {}))
-                    new-stable-facts (->> incoming-stable-facts
-                                          (remove (fn [[fact _]] (get changed-facts fact)))
-                                          (into {}))
-                    new-volatile-facts (merge incoming-volatile-facts
-                                              changed-facts)]
-                {:stable (sutils/munge-jsonb-for-storage new-stable-facts)
-                 :stable_hash (hash new-stable-facts)
-                 :volatile (sutils/munge-jsonb-for-storage new-volatile-facts)}))
+          current-volatile-fact-keys (volatile-fact-keys-for-factset factset_id)
+          incoming-volatile-facts (select-keys values current-volatile-fact-keys)
+          incoming-stable-facts (apply dissoc values current-volatile-fact-keys)
+          incoming-stable-fact-hash (hash incoming-stable-facts)
+          fact-json-updates (if (not= stable_hash incoming-stable-fact-hash)
+                              ;; stable facts are different; load the json and move the ones that
+                              ;; changed into volatile
+                              (let [current-stable-facts (load-stable-facts factset_id)
+                                    changed-facts (->> incoming-stable-facts
+                                                       (filter (fn [[fact new-value]]
+                                                                 (when-let [current (get current-stable-facts fact)]
+                                                                   (not= new-value current))))
+                                                       (into {}))
+                                    new-stable-facts (->> incoming-stable-facts
+                                                          (remove (fn [[fact _]] (get changed-facts fact)))
+                                                          (into {}))
+                                    new-volatile-facts (merge incoming-volatile-facts
+                                                              changed-facts)]
+                                {:stable (sutils/munge-jsonb-for-storage new-stable-facts)
+                                 :stable_hash (hash new-stable-facts)
+                                 :volatile (sutils/munge-jsonb-for-storage new-volatile-facts)})
 
-            ;; no change to stable facts, so just update volatile
-            (do
-              (log/error "UPDATING JUST VOLATILE")
-             {:volatile (sutils/munge-jsonb-for-storage incoming-volatile-facts)}))]
-
-
+                              ;; no change to stable facts, so just update volatile
+                              {:volatile (sutils/munge-jsonb-for-storage incoming-volatile-facts)})]
 
       (when (or package_hash (seq package_inventory))
         (update-packages certname_id package_hash package_inventory))
